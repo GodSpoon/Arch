@@ -18,3 +18,12 @@ curl -sSL https://github.com/GodSpoon/Arch/blob/main/scripts/claude_uri_setup.sh
 ```
 ---
 
+## Naming Convention and README Structure Overview
+
+| Feature        | Description                                                                                                                                                                                                                                                           |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **File Naming** | `scripts/<tool>_<action>.sh` where `<tool>` is the primary software being configured (e.g., `podman`, `claude`) and `<action>` describes the script's purpose (e.g., `setup`, `uri_setup`). This emphasizes the target software and the operation performed.                                  |
+| **README Description** | Each script entry has a concise, technically-oriented summary explaining its function.                                                                                                                                                                                                |
+| **README Execution** | The README provides a direct `curl` command to execute the script, facilitating easy installation and configuration. Where appropriate, the raw file URL is used for direct execution; otherwise the blob URL is used.                                                                                                |
+| **README Organization** | The README is structured with clear headings (e.g., `## Scripts`) to categorize the scripts and uses separators (`---`) for visual clarity between entries. Each script entry includes a title, description, and execution command. The top-level heading provides a brief overview of the repository's contents. |
+
