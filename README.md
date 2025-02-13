@@ -17,7 +17,20 @@ Registers a custom x-scheme-handler/claude via a user-local .desktop file, ensur
 curl -sSL https://github.com/GodSpoon/Arch/blob/main/scripts/claude_uri_setup.sh | bash
 ```
 ---
+## Tools
+**AUR**
 
+Cool obscure repository where people upload their custom arch application PKGBUILDS for the community to use as well I guess
+Not many people seem to know about it so keep an eye out
+
+https://aur.archlinux.org/packages
+
+
+
+
+
+
+---
 ## Naming Convention and README Structure Overview
 
 | Feature        | Description                                                                                                                                                                                                                                                           |
