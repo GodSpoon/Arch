@@ -90,6 +90,9 @@ sudo touch /etc/subuid /etc/subgid
 sudo usermod --add-subuids 100000-165535 $USER
 sudo usermod --add-subgids 100000-165535 $USER
 
+# Run the podman system migrate
+podman system migrate
+
 # Enable and start the podman socket (optional, for Docker API compatibility)
 systemctl --user enable podman.socket
 systemctl --user start podman.socket
