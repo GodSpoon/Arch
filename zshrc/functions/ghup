@@ -1,0 +1,18 @@
+# Auto add, commit, and push with timestamp and change summary
+ghup() {
+  # Check if in git repo
+  git rev-parse --is-inside-work-tree > /dev/null 2>&1 || { echo "Not in a git repository"; return 1; }
+
+  # Get timestamp and stage changes
+  timestamp=$(date "+%Y-%m-%d_%H-%M-%S")
+  git add -A
+
+  # Create summary of changes (files and stats)
+  changes=$(git diff --cached --stat | grep '|' | awk '{print $1 " (" $4 " " $5 ")"}' | head -5 | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+  files_count=$(git diff --cached --stat | grep '|' | wc -l)
+  [[ $files_count -gt 5 ]] && changes="${changes}, ...(and $((files_count-5)) more files)"
+
+  # Commit and push
+  echo "Committing and pushing changes: ${timestamp}+${changes}"
+  git commit -m "${timestamp}+${changes}" && git push
+}

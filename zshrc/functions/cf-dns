@@ -1,0 +1,344 @@
+# Cloudflare DNS Manager - Add this to your ~/.zshrc
+
+cf-dns() {
+    local action="$1"
+
+    # Function to check if command exists
+    local command_exists() {
+        command -v "$1" >/dev/null 2>&1
+    }
+
+    # Check for AUR helper
+    local get_aur_helper() {
+        if command_exists yay; then
+            echo "yay"
+        elif command_exists paru; then
+            echo "paru"
+        else
+            echo "none"
+        fi
+    }
+
+    # Install flarectl if needed
+    if ! command_exists flarectl; then
+        echo "flarectl not found. Installing..."
+        local aur_helper=$(get_aur_helper)
+
+        if [ "$aur_helper" = "none" ]; then
+            echo "No AUR helper found. Please install yay or paru first:"
+            echo "  sudo pacman -S --needed base-devel git"
+            echo "  git clone https://aur.archlinux.org/yay.git && cd yay && makepkg -si"
+            return 1
+        fi
+
+        echo "Installing flarectl with $aur_helper..."
+        $aur_helper -S --noconfirm flarectl-bin
+    fi
+
+    # Export CF API token from pass
+    if ! command_exists pass; then
+        echo "Error: pass is not installed. Run the setup script first."
+        return 1
+    fi
+
+    if ! pass show cloudflare/api-token >/dev/null 2>&1; then
+        echo "Error: Cloudflare API token not found in pass."
+        echo "Run: pass insert cloudflare/api-token"
+        return 1
+    fi
+
+    export CF_API_TOKEN="$(pass show cloudflare/api-token)"
+
+    # Quick actions for common use cases
+    case "$action" in
+        "list"|"ls")
+            local zone="$2"
+            if [ -z "$zone" ]; then
+                echo "Usage: cf-dns list <zone>"
+                echo "Example: cf-dns list spoon.rip"
+                return 1
+            fi
+            echo "📋 Listing DNS records for zone: $zone"
+            flarectl dns list --zone "$zone"
+            return 0
+            ;;
+        "create"|"add")
+            if [ $# -lt 5 ]; then
+                echo "Usage: cf-dns create <zone> <name> <type> <content> [priority]"
+                echo "Examples:"
+                echo "  cf-dns create spoon.rip pve-m1 CNAME opnsense.spoon.rip"
+                echo "  cf-dns create spoon.rip @ A 192.168.1.100"
+                echo "  cf-dns create spoon.rip mail MX mail.spoon.rip 10"
+                return 1
+            fi
+            local zone="$2" name="$3" type="$4" content="$5" priority="$6"
+
+            local cmd="flarectl dns create --zone \"$zone\" --name \"$name\" --type \"$type\" --content \"$content\""
+            if [ -n "$priority" ] && [[ "$type" == "MX" || "$type" == "SRV" ]]; then
+                cmd="$cmd --priority $priority"
+            fi
+
+            echo "🚀 Creating DNS record: $name.$zone -> $content ($type)"
+            eval $cmd
+            [ $? -eq 0 ] && echo "✅ DNS record created successfully!" || echo "❌ Failed to create DNS record"
+            return 0
+            ;;
+        "help"|"-h"|"--help")
+            echo "🌐 Cloudflare DNS Manager"
+            echo ""
+            echo "Quick Commands:"
+            echo "  cf-dns list <zone>                          - List all DNS records"
+            echo "  cf-dns create <zone> <name> <type> <content> - Create DNS record"
+            echo "  cf-dns interactive                          - Interactive menu mode"
+            echo ""
+            echo "Examples:"
+            echo "  cf-dns list spoon.rip"
+            echo "  cf-dns create spoon.rip pve-m1 CNAME opnsense.spoon.rip"
+            echo "  cf-dns create spoon.rip @ A 192.168.1.100"
+            echo "  cf-dns create spoon.rip mail MX mail.spoon.rip 10"
+            return 0
+            ;;
+        "interactive"|"menu"|"")
+            # Fall through to interactive mode
+            ;;
+        *)
+            echo "Unknown action: $action"
+            echo "Run: cf-dns help"
+            return 1
+            ;;
+    esac
+
+    # Interactive mode functions
+    local show_main_menu() {
+        echo ""
+        echo "🌐 Cloudflare DNS Manager"
+        echo "Choose an action:"
+        echo "1) List DNS records"
+        echo "2) Create DNS record"
+        echo "3) Update DNS record"
+        echo "4) Delete DNS record"
+        echo "5) Exit"
+        echo ""
+    }
+
+    local show_record_types() {
+        echo ""
+        echo "Select DNS record type:"
+        echo "1) A (IPv4 address)"
+        echo "2) AAAA (IPv6 address)"
+        echo "3) CNAME (Canonical name)"
+        echo "4) MX (Mail exchange)"
+        echo "5) TXT (Text record)"
+        echo "6) SRV (Service record)"
+        echo "7) NS (Name server)"
+        echo ""
+    }
+
+    local get_zone() {
+        read "zone?Enter zone (e.g., spoon.rip): "
+        if [ -z "$zone" ]; then
+            echo "Zone cannot be empty"
+            return 1
+        fi
+    }
+
+    local get_record_name() {
+        read "record_name?Enter record name (e.g., pve-m1 for pve-m1.$zone): "
+        if [ -z "$record_name" ]; then
+            echo "Record name cannot be empty"
+            return 1
+        fi
+    }
+
+    local get_record_content() {
+        local record_type="$1"
+
+        case "$record_type" in
+            "A")
+                read "content?Enter IPv4 address (e.g., 192.168.1.100): "
+                ;;
+            "AAAA")
+                read "content?Enter IPv6 address (e.g., 2001:db8::1): "
+                ;;
+            "CNAME")
+                read "content?Enter target hostname (e.g., opnsense.spoon.rip): "
+                ;;
+            "MX")
+                read "priority?Enter priority (e.g., 10): "
+                read "content?Enter mail server (e.g., mail.spoon.rip): "
+                ;;
+            "TXT")
+                read "content?Enter text content: "
+                ;;
+            "SRV")
+                read "priority?Enter priority: "
+                read "weight?Enter weight: "
+                read "port?Enter port: "
+                read "content?Enter target: "
+                ;;
+            "NS")
+                read "content?Enter nameserver (e.g., ns1.example.com): "
+                ;;
+            *)
+                echo "Unknown record type"
+                return 1
+                ;;
+        esac
+
+        if [ -z "$content" ]; then
+            echo "Content cannot be empty"
+            return 1
+        fi
+    }
+
+    local list_records() {
+        get_zone || return 1
+        echo "📋 Listing DNS records for zone: $zone"
+        flarectl dns list --zone "$zone"
+    }
+
+    local create_record() {
+        get_zone || return 1
+        get_record_name || return 1
+
+        show_record_types
+        read "type_choice?Select record type (1-7): "
+
+        case "$type_choice" in
+            1) local record_type="A" ;;
+            2) local record_type="AAAA" ;;
+            3) local record_type="CNAME" ;;
+            4) local record_type="MX" ;;
+            5) local record_type="TXT" ;;
+            6) local record_type="SRV" ;;
+            7) local record_type="NS" ;;
+            *) echo "Invalid choice"; return 1 ;;
+        esac
+
+        get_record_content "$record_type" || return 1
+
+        local cmd="flarectl dns create --zone \"$zone\" --name \"$record_name\" --type \"$record_type\" --content \"$content\""
+
+        case "$record_type" in
+            "MX")
+                cmd="$cmd --priority $priority"
+                ;;
+            "SRV")
+                cmd="$cmd --priority $priority --port $port"
+                if [ -n "$weight" ]; then
+                    cmd="$cmd --weight $weight"
+                fi
+                ;;
+        esac
+
+        echo ""
+        echo "🚀 Creating DNS record..."
+        echo "Command: $cmd"
+        echo ""
+
+        eval $cmd
+
+        if [ $? -eq 0 ]; then
+            echo "✅ DNS record created successfully!"
+        else
+            echo "❌ Failed to create DNS record"
+        fi
+    }
+
+    local update_record() {
+        get_zone || return 1
+        echo "📋 Listing records first..."
+        flarectl dns list --zone "$zone" || return 1
+        echo ""
+        read "record_id?Enter the record ID to update: "
+
+        if [ -z "$record_id" ]; then
+            echo "Record ID cannot be empty"
+            return 1
+        fi
+
+        show_record_types
+        read "type_choice?Select new record type (1-7): "
+
+        case "$type_choice" in
+            1) local record_type="A" ;;
+            2) local record_type="AAAA" ;;
+            3) local record_type="CNAME" ;;
+            4) local record_type="MX" ;;
+            5) local record_type="TXT" ;;
+            6) local record_type="SRV" ;;
+            7) local record_type="NS" ;;
+            *) echo "Invalid choice"; return 1 ;;
+        esac
+
+        get_record_content "$record_type" || return 1
+
+        echo ""
+        echo "🔄 Updating DNS record..."
+        flarectl dns update --zone "$zone" --id "$record_id" --type "$record_type" --content "$content"
+
+        if [ $? -eq 0 ]; then
+            echo "✅ DNS record updated successfully!"
+        else
+            echo "❌ Failed to update DNS record"
+        fi
+    }
+
+    local delete_record() {
+        get_zone || return 1
+        flarectl dns list --zone "$zone" || return 1
+        echo ""
+        read "record_id?Enter the record ID to delete: "
+
+        if [ -z "$record_id" ]; then
+            echo "Record ID cannot be empty"
+            return 1
+        fi
+
+        read "confirm?Are you sure you want to delete record ID $record_id? (y/N): "
+
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            echo "🗑️  Deleting DNS record..."
+            flarectl dns delete --zone "$zone" --id "$record_id"
+
+            if [ $? -eq 0 ]; then
+                echo "✅ DNS record deleted successfully!"
+            else
+                echo "❌ Failed to delete DNS record"
+            fi
+        else
+            echo "Delete cancelled"
+        fi
+    }
+
+    # Interactive mode main loop
+    while true; do
+        show_main_menu
+        read "choice?Enter your choice (1-5): "
+
+        case "$choice" in
+            1)
+                list_records
+                ;;
+            2)
+                create_record
+                ;;
+            3)
+                update_record
+                ;;
+            4)
+                delete_record
+                ;;
+            5)
+                echo "👋 Goodbye!"
+                return 0
+                ;;
+            *)
+                echo "Invalid choice. Please select 1-5."
+                ;;
+        esac
+
+        echo ""
+        read "?Press Enter to continue..."
+    done
+}

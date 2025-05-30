@@ -1,0 +1,38 @@
+tokens() {
+    if [ $# -eq 0 ]; then
+        echo "Usage: tokens <filename>"
+        return 1
+    fi
+
+    local file="$1"
+
+    if [ ! -f "$file" ]; then
+        echo "Error: File '$file' not found"
+        return 1
+    fi
+
+    # Count words (basic approximation)
+    local word_count=$(wc -w < "$file")
+
+    # Count numbers (assuming they're space-separated)
+    local number_count=$(grep -o '[0-9][0-9.]*' "$file" | wc -l)
+
+    # Count special characters and punctuation
+    local special_count=$(grep -o '[^a-zA-Z0-9[:space:]]' "$file" | wc -l)
+
+    # Basic token estimation:
+    # - Most words are 1 token
+    # - Numbers often split into multiple tokens
+    # - Special characters and punctuation are usually separate tokens
+    # - Add 10% overhead for things like spaces and special token combinations
+    local estimated_tokens=$(( (word_count + number_count + special_count) * 11 / 10 ))
+
+    echo "File: $file"
+    echo "Words: $word_count"
+    echo "Numbers: $number_count"
+    echo "Special characters: $special_count"
+    echo "Estimated tokens: $estimated_tokens"
+
+    # Optional: show character count for reference
+    echo "Total characters: $(wc -m < "$file")"
+}

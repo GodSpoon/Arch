@@ -1,0 +1,62 @@
+rmr() {
+    local update_yay=false
+    local update_pacman=false
+    local clear_cache=true
+
+    # Parse command line options
+    while getopts ":ypc" opt; do
+        case ${opt} in
+            y ) update_yay=true ;;
+            p ) update_pacman=true ;;
+            c ) clear_cache=false ;;
+            \? ) echo "Usage: rmr [-y] [-p] [-c]"
+                 echo "  -y: Update packages using yay"
+                 echo "  -p: Update packages using pacman"
+                 echo "  -c: Disable cache clearing"
+                 return 1
+            ;;
+        esac
+    done
+
+    # Temporary files for mirrors
+    local TMPFILE_ARCH="$(mktemp)"
+    local TMPFILE_ENDEAVOUR="$(mktemp)"
+    local TMPFILE_CHAOTIC="$(mktemp)"
+
+    # Ensure sudo privileges
+    sudo true || return 1
+
+    # Update Arch Linux mirrors
+    rate-mirrors --save=$TMPFILE_ARCH --disable-comments-in-file --protocol https --country-test-mirrors-per-country 3 --country-neighbors-per-country 1 arch --max-delay=24000 \
+    && sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup \
+    && sudo mv $TMPFILE_ARCH /etc/pacman.d/mirrorlist
+
+    # Update EndeavourOS mirrors
+    rate-mirrors --save=$TMPFILE_ENDEAVOUR endeavouros \
+    && sudo mv /etc/pacman.d/endeavouros-mirrorlist /etc/pacman.d/endeavouros-mirrorlist-backup \
+    && sudo mv $TMPFILE_ENDEAVOUR /etc/pacman.d/endeavouros-mirrorlist
+
+    # Update Chaotic AUR mirrors
+    rate-mirrors --save=$TMPFILE_CHAOTIC chaotic-aur \
+    && sudo mv /etc/pacman.d/chaotic-mirrorlist /etc/pacman.d/chaotic-mirrorlist-backup \
+    && sudo mv $TMPFILE_CHAOTIC /etc/pacman.d/chaotic-mirrorlist
+
+    # Clear cache if enabled
+    if $clear_cache; then
+        echo "Clearing package cache..."
+        sudo paccache -r
+        sudo paccache -ruk0
+        yay -Scc --noconfirm
+    fi
+
+    # Update packages if requested
+    if $update_yay; then
+        echo "Updating packages with yay..."
+        yay -Syyu --noconfirm
+    elif $update_pacman; then
+        echo "Updating packages with pacman..."
+        sudo pacman -Syu --noconfirm
+    fi
+
+    echo "rmr completed successfully."
+}
