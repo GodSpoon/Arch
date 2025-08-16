@@ -1,0 +1,352 @@
+#!/bin/bash
+# ABK - Arch Linux Backup & Restore System (Cache-Aware Version)
+
+abk() {
+    local ABK_REPO="$HOME/SPOON_GIT/abk"
+    local TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    local DATE_READABLE=$(date +"%Y-%m-%d %H:%M:%S")
+    
+    # Colors for output
+    local RED='\033[0;31m'
+    local GREEN='\033[0;32m'
+    local YELLOW='\033[1;33m'
+    local BLUE='\033[0;34m'
+    local NC='\033[0m'
+    
+    print_status() { echo -e "${BLUE}[ABK]${NC} $1"; }
+    print_success() { echo -e "${GREEN}[ABK]${NC} $1"; }
+    print_warning() { echo -e "${YELLOW}[ABK]${NC} $1"; }
+    print_error() { echo -e "${RED}[ABK]${NC} $1"; }
+
+    case "$1" in
+        "backup") backup_system ;;
+        "restore") restore_system "$2" ;;
+        "schedule") schedule_backup ;;
+        "status") show_status ;;
+        "clean") clean_repo ;;
+        *) show_help ;;
+    esac
+}
+
+backup_system() {
+    print_status "Starting cache-aware system backup..."
+    
+    mkdir -p "$ABK_REPO"/{dotfiles,configs,packages,kde,scripts,git-config,fonts,themes,apps,misc}
+    
+    # Function to smart copy with cache exclusions
+    smart_copy() {
+        local src="$1"
+        local dest="$2"
+        
+        if [[ -e "$HOME/$src" ]]; then
+            mkdir -p "$ABK_REPO/configs/$(dirname "$src")"
+            
+            if command -v rsync &> /dev/null; then
+                rsync -av \
+                    --exclude='cache/' --exclude='Cache/' --exclude='CachedData/' \
+                    --exclude='CachedExtensions/' --exclude='CachedExtensionVSIXs/' \
+                    --exclude='GPUCache/' --exclude='ShaderCache/' --exclude='DawnCache/' \
+                    --exclude='logs/' --exclude='workspaceStorage/' --exclude='History/' \
+                    --exclude='globalStorage/' --exclude='SingletonLock' --exclude='lockfile' \
+                    --exclude='LOCK' --exclude='*.lock' --exclude='blob_storage/' \
+                    --exclude='Session Storage/' --exclude='Local Storage/' \
+                    --exclude='IndexedDB/' --exclude='modules/' --exclude='node_modules/' \
+                    --exclude='*.node' --exclude='*.vsix' \
+                    "$HOME/$src/" "$dest/" 2>/dev/null
+            else
+                # Fallback to cp with basic exclusions
+                find "$HOME/$src" -type f ! -path "*/cache/*" ! -path "*/Cache/*" \
+                    ! -path "*/CachedExtensionVSIXs/*" ! -name "*.node" ! -name "*.vsix" \
+                    -exec cp --parents {} "$dest/" \; 2>/dev/null
+            fi
+        fi
+    }
+    
+    # Backup dotfiles
+    print_status "Backing up dotfiles..."
+    for file in .zshrc .bashrc .gitconfig .vimrc .tmux.conf; do
+        [[ -f "$HOME/$file" ]] && cp "$HOME/$file" "$ABK_REPO/dotfiles/" 2>/dev/null
+    done
+    
+    # Smart backup of config directories
+    print_status "Backing up configurations (excluding caches)..."
+    local config_dirs=("kdeglobals" "kdedefaults" "plasmarc" "plasma-org.kde.plasma.desktop-appletsrc" 
+                      "kwinrc" "khotkeysrc" "Code" "VSCodium" "discord" "spotify" "chromium"
+                      "firefox" "thunderbird" "obsidian" "fontconfig" "gtk-3.0" "gtk-4.0"
+                      "qt5ct" "qt6ct" "konsolerc" "dolphinrc" "okularrc")
+    
+    for dir in "${config_dirs[@]}"; do
+        smart_copy ".config/$dir" "$ABK_REPO/configs/.config/$dir"
+    done
+    
+    # Special browser handling
+    print_status "Backing up browser profiles (excluding caches)..."
+    for browser_dir in .mozilla .thunderbird; do
+        if [[ -d "$HOME/$browser_dir" ]]; then
+            mkdir -p "$ABK_REPO/configs/$browser_dir"
+            if command -v rsync &> /dev/null; then
+                rsync -av \
+                    --exclude='cache*/' --exclude='Cache*/' --exclude='OfflineCache/' \
+                    --exclude='startupCache/' --exclude='thumbnails/' \
+                    "$HOME/$browser_dir/" "$ABK_REPO/configs/$browser_dir/" 2>/dev/null
+            fi
+        fi
+    done
+    
+    # Hidden directories
+    print_status "Backing up themes and local data..."
+    local hidden_dirs=(".oh-my-zsh-custom" ".themes" ".icons" ".local/share/applications"
+                      ".local/share/fonts" ".local/share/themes" ".local/share/icons"
+                      ".local/share/color-schemes" ".local/share/plasma" ".local/share/kservices5")
+    
+    for dir in "${hidden_dirs[@]}"; do
+        if [[ -d "$HOME/$dir" ]]; then
+            mkdir -p "$ABK_REPO/configs/$(dirname "$dir")"
+            cp -rf "$HOME/$dir" "$ABK_REPO/configs/$dir" 2>/dev/null
+        fi
+    done
+    
+    # SSH and GPG
+    print_status "Backing up SSH and GPG configurations..."
+    if [[ -d "$HOME/.ssh" ]]; then
+        mkdir -p "$ABK_REPO/git-config/ssh"
+        cp "$HOME/.ssh/config" "$ABK_REPO/git-config/ssh/" 2>/dev/null
+        cp "$HOME/.ssh/"*.pub "$ABK_REPO/git-config/ssh/" 2>/dev/null
+        cp "$HOME/.ssh/known_hosts" "$ABK_REPO/git-config/ssh/" 2>/dev/null
+    fi
+    
+    if [[ -d "$HOME/.gnupg" ]]; then
+        mkdir -p "$ABK_REPO/git-config/gnupg"
+        gpg --export > "$ABK_REPO/git-config/gnupg/public-keys.asc" 2>/dev/null
+        cp "$HOME/.gnupg/gpg.conf" "$ABK_REPO/git-config/gnupg/" 2>/dev/null
+    fi
+    
+    # Shell functions and completions
+    print_status "Backing up shell functions..."
+    [[ -d "$HOME/SPOON_GIT/Arch/zshrc/functions" ]] && cp -rf "$HOME/SPOON_GIT/Arch/zshrc/functions" "$ABK_REPO/scripts/"
+    [[ -d "$HOME/.zsh_completions" ]] && cp -rf "$HOME/.zsh_completions" "$ABK_REPO/scripts/"
+    [[ -d "$HOME/.oh-my-zsh/custom" ]] && cp -rf "$HOME/.oh-my-zsh/custom" "$ABK_REPO/configs/oh-my-zsh-custom"
+    
+    # Package lists
+    print_status "Generating package lists..."
+    pacman -Qe > "$ABK_REPO/packages/pacman-explicit.txt"
+    pacman -Qm > "$ABK_REPO/packages/aur-packages.txt"
+    command -v flatpak &> /dev/null && flatpak list --app --columns=application > "$ABK_REPO/packages/flatpak-packages.txt"
+    command -v snap &> /dev/null && snap list > "$ABK_REPO/packages/snap-packages.txt"
+    [[ -d "$HOME/Applications" ]] && find "$HOME/Applications" -name "*.AppImage" > "$ABK_REPO/packages/appimages.txt"
+    command -v pip &> /dev/null && pip list --user > "$ABK_REPO/packages/pip-packages.txt"
+    command -v code &> /dev/null && code --list-extensions > "$ABK_REPO/packages/vscode-extensions.txt"
+    command -v codium &> /dev/null && codium --list-extensions > "$ABK_REPO/packages/vscodium-extensions.txt"
+    
+    generate_package_installer
+    
+    # KDE configs
+    print_status "Backing up KDE/Plasma configurations..."
+    local kde_patterns=(".config/plasma*" ".config/kde*" ".config/kwin*" ".config/khotkeys*" 
+                       ".config/konsole*" ".config/dolphin*" ".config/kate*" ".config/okular*"
+                       ".local/share/plasma*" ".local/share/color-schemes" ".local/share/konsole")
+    
+    for pattern in "${kde_patterns[@]}"; do
+        for match in $HOME/$pattern; do
+            if [[ -e "$match" ]]; then
+                rel_path="${match#$HOME/}"
+                mkdir -p "$ABK_REPO/kde/$(dirname "$rel_path")"
+                if command -v rsync &> /dev/null; then
+                    rsync -av --exclude='thumbnails/' --exclude='cache/' "$match/" "$ABK_REPO/kde/$rel_path/" 2>/dev/null
+                else
+                    cp -rf "$match" "$ABK_REPO/kde/$rel_path" 2>/dev/null
+                fi
+            fi
+        done
+    done
+    
+    # Fonts and themes (size-limited)
+    print_status "Backing up fonts and themes..."
+    [[ -d "$HOME/.local/share/fonts" ]] && find "$HOME/.local/share/fonts" -type f -size -10M -exec cp --parents {} "$ABK_REPO/fonts/" \; 2>/dev/null
+    
+    if [[ -d "$HOME/.themes" ]]; then
+        mkdir -p "$ABK_REPO/themes"
+        command -v rsync &> /dev/null && rsync -av --exclude='*.tar.*' --exclude='*.zip' "$HOME/.themes/" "$ABK_REPO/themes/.themes/" 2>/dev/null
+    fi
+    
+    if [[ -d "$HOME/.icons" ]]; then
+        mkdir -p "$ABK_REPO/themes"
+        command -v rsync &> /dev/null && rsync -av --exclude='*.tar.*' --exclude='*.zip' "$HOME/.icons/" "$ABK_REPO/themes/.icons/" 2>/dev/null
+    fi
+    
+    # Generate system info and scripts
+    generate_system_info
+    generate_readme
+    generate_restore_script
+    
+    # Git operations
+    cd "$ABK_REPO"
+    [[ ! -d ".git" ]] && git init && git branch -M main
+    
+    # Ensure proper .gitignore exists
+    setup_gitignore
+    
+    git add . 2>/dev/null
+    git commit -m "System backup - $DATE_READABLE" 2>/dev/null
+    
+    local size=$(du -sh . 2>/dev/null | cut -f1 || echo "unknown")
+    print_success "Backup completed! Size: $size"
+    print_status "Use 'ghup' to sync to GitHub"
+}
+
+setup_gitignore() {
+    cat > .gitignore << 'EOF'
+# Cache directories
+configs/.config/*/cache/
+configs/.config/*/Cache/
+configs/.config/*/CachedData/
+configs/.config/*/CachedExtensions/
+configs/.config/*/CachedExtensionVSIXs/
+configs/.config/*/GPUCache/
+configs/.config/*/logs/
+configs/.config/*/workspaceStorage/
+configs/.config/*/History/
+configs/.config/*/globalStorage/
+configs/.config/*/blob_storage/
+configs/.config/*/Session*Storage/
+configs/.config/*/IndexedDB/
+configs/.config/discord/*/modules/
+configs/.mozilla/*/cache*/
+configs/.mozilla/*/Cache*/
+configs/.thunderbird/*/cache*/
+configs/.config/chromium/*/Cache/
+configs/.config/spotify/*/Cache/
+
+# Large binaries
+**/*.node
+**/*.vsix
+**/*.exe
+**/*.dll
+**/*.so
+
+# Sensitive files
+git-config/gnupg/private-keys.asc
+git-config/ssh/id_*
+!git-config/ssh/*.pub
+
+# System files
+*.log
+*.tmp
+*~
+.DS_Store
+Thumbs.db
+**/*lock*
+**/LOCK
+EOF
+}
+
+clean_repo() {
+    print_status "Cleaning repository of large files..."
+    cd "$ABK_REPO"
+    
+    # Remove large files from current working directory
+    find . -name "CachedExtensionVSIXs" -type d -exec rm -rf {} + 2>/dev/null || true
+    find . -name "*.node" -size +10M -delete 2>/dev/null || true
+    find . -name "*.vsix" -delete 2>/dev/null || true
+    find . -path "*/modules/*" -name "*.node" -delete 2>/dev/null || true
+    
+    setup_gitignore
+    git add . && git commit -m "Clean large files - $(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+    print_success "Repository cleaned"
+}
+
+generate_package_installer() {
+    cat > "$ABK_REPO/packages/install-packages.sh" << 'EOF'
+#!/bin/bash
+echo "=== ABK Package Installer ==="
+read -p "Continue? (y/N): " -n 1 -r && echo
+[[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+
+[[ -f pacman-explicit.txt ]] && grep -v "$(pacman -Qm | cut -d' ' -f1)" pacman-explicit.txt | cut -d' ' -f1 | sudo pacman -S --needed -
+[[ -f aur-packages.txt ]] && command -v yay &> /dev/null && cut -d' ' -f1 aur-packages.txt | yay -S --needed -
+[[ -f flatpak-packages.txt ]] && command -v flatpak &> /dev/null && while read -r app; do flatpak install -y "$app"; done < flatpak-packages.txt
+[[ -f vscode-extensions.txt ]] && command -v code &> /dev/null && while read -r ext; do code --install-extension "$ext"; done < vscode-extensions.txt
+echo "Package installation complete!"
+EOF
+    chmod +x "$ABK_REPO/packages/install-packages.sh"
+}
+
+generate_system_info() {
+    {
+        echo "# ABK System Backup - $(hostname)"
+        echo "Generated: $DATE_READABLE"
+        echo "User: $(whoami)"
+        echo "Kernel: $(uname -r)"
+        echo "Desktop: $XDG_CURRENT_DESKTOP"
+        echo "Backup size: $(du -sh . 2>/dev/null | cut -f1 || echo "calculating...")"
+    } > "$ABK_REPO/SYSTEM_INFO.md"
+}
+
+generate_readme() {
+    cat > "$ABK_REPO/README.md" << EOF
+# ABK Backup - $(hostname)
+Generated: $DATE_READABLE
+
+## Quick Restore
+\`\`\`bash
+git clone https://github.com/GodSpoon/abk
+cd abk && git checkout $(hostname)
+./restore.sh --selective
+\`\`\`
+
+## Contents
+- Dotfiles, shell configs, functions
+- Package lists: $(find packages/ -name "*.txt" | wc -l) files
+- KDE/Plasma configurations
+- Application settings (cache-free)
+- SSH/GPG public keys
+EOF
+}
+
+generate_restore_script() {
+    cat > "$ABK_REPO/restore.sh" << 'EOF'
+#!/bin/bash
+RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
+print_status() { echo -e "${BLUE}[RESTORE]${NC} $1"; }
+print_success() { echo -e "${GREEN}[RESTORE]${NC} $1"; }
+
+restore_all() {
+    print_status "Restoring all configurations..."
+    cp -f dotfiles/* "$HOME/" 2>/dev/null
+    cp -rf configs/.config/* "$HOME/.config/" 2>/dev/null
+    cp -rf configs/.local/* "$HOME/.local/" 2>/dev/null
+    cp -rf configs/.themes "$HOME/" 2>/dev/null
+    cp -rf configs/.icons "$HOME/" 2>/dev/null
+    mkdir -p "$HOME/SPOON_GIT/Arch/zshrc" && cp -rf scripts/functions "$HOME/SPOON_GIT/Arch/zshrc/" 2>/dev/null
+    mkdir -p "$HOME/.ssh" && cp -f git-config/ssh/* "$HOME/.ssh/" 2>/dev/null && chmod 600 "$HOME/.ssh/"* 2>/dev/null
+    cd packages && ./install-packages.sh
+    print_success "Restore completed! Reboot recommended."
+}
+
+if [[ "$1" == "--selective" ]]; then
+    echo "1) Full restore  2) Dotfiles only  3) Configs only  4) Packages only"
+    read -p "Choice: " choice
+    case $choice in
+        1) restore_all ;;
+        2) cp -f dotfiles/* "$HOME/" 2>/dev/null && print_success "Dotfiles restored" ;;
+        3) cp -rf configs/.config/* "$HOME/.config/" 2>/dev/null && print_success "Configs restored" ;;
+        4) cd packages && ./install-packages.sh ;;
+    esac
+else
+    restore_all
+fi
+EOF
+    chmod +x "$ABK_REPO/restore.sh"
+}
+
+restore_system() { [[ -d "$ABK_REPO" ]] && cd "$ABK_REPO" && ./restore.sh "$1" || print_error "No backup found"; }
+schedule_backup() { (crontab -l 2>/dev/null; echo "0 2 * * * $HOME/SPOON_GIT/Arch/zshrc/functions/abk backup") | crontab - && print_success "Daily backup scheduled"; }
+show_status() {
+    print_status "ABK Status"
+    [[ -d "$ABK_REPO" ]] && cd "$ABK_REPO" && echo "Last backup: $(git log -1 --format="%ar" 2>/dev/null || echo "None")" && echo "Size: $(du -sh . | cut -f1)" || print_warning "No backup found"
+}
+show_help() {
+    echo "ABK - Arch Linux Backup & Restore System"
+    echo "Commands: backup, restore, status, schedule, clean"
+    echo "Usage: abk <command>"
+}
