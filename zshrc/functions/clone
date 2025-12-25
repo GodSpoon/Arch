@@ -1,0 +1,14 @@
+#!/bin/bash
+# Clone wrapper function - automatically calls the clone script with sudo
+
+clone() {
+    local CLONE_SCRIPT="/home/sam/SPOON_GIT/Arch/zshrc/functions/.clone_script"
+    
+    if [[ ! -x "$CLONE_SCRIPT" ]]; then
+        echo "Error: Clone script not found or not executable at $CLONE_SCRIPT" >&2
+        return 1
+    fi
+    
+    # Call the actual script with sudo, passing all arguments
+    sudo "$CLONE_SCRIPT" "$@"
+}

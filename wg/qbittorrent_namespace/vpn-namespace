@@ -1,0 +1,2 @@
+Defaults!/usr/bin/ip env_keep += "TERMINFO TERM DISPLAY XAUTHORITY XDG_RUNTIME_DIR HOME USER PATH LANG LC_ALL"
+sam ALL=(ALL) NOPASSWD: /usr/bin/ip netns exec qbtorrent *

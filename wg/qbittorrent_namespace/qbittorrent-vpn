@@ -1,0 +1,10 @@
+#!/bin/bash
+# Allow the namespace to access X server
+xhost +local: 2>/dev/null
+
+# Preserve needed environment variables
+PRESERVE_ENV="DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,HOME,USER,PATH,LANG,LC_ALL"
+
+# Run qBittorrent in the namespace with GUI access
+sudo ip netns exec qbtorrent sudo -u $USER --preserve-env=$PRESERVE_ENV \
+    qbittorrent "$@"

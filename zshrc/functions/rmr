@@ -27,7 +27,7 @@ rmr() {
     sudo true || return 1
 
     # Update Arch Linux mirrors
-    rate-mirrors --save=$TMPFILE_ARCH --disable-comments-in-file --protocol https --country-test-mirrors-per-country 3 --country-neighbors-per-country 1 arch --max-delay=24000 \
+    rate-mirrors --save=$TMPFILE_ARCH --disable-comments-in-file --protocol https --country-test-mirrors-per-country 3 --country-neighbors-per-country 1 arch --max-delay=40000 \
     && sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup \
     && sudo mv $TMPFILE_ARCH /etc/pacman.d/mirrorlist
 
@@ -37,9 +37,9 @@ rmr() {
     && sudo mv $TMPFILE_ENDEAVOUR /etc/pacman.d/endeavouros-mirrorlist
 
     # Update Chaotic AUR mirrors
-    rate-mirrors --save=$TMPFILE_CHAOTIC chaotic-aur \
-    && sudo mv /etc/pacman.d/chaotic-mirrorlist /etc/pacman.d/chaotic-mirrorlist-backup \
-    && sudo mv $TMPFILE_CHAOTIC /etc/pacman.d/chaotic-mirrorlist
+    # rate-mirrors --save=$TMPFILE_CHAOTIC chaotic-aur \
+    #&& sudo mv /etc/pacman.d/chaotic-mirrorlist /etc/pacman.d/chaotic-mirrorlist-backup \
+    #&& sudo mv $TMPFILE_CHAOTIC /etc/pacman.d/chaotic-mirrorlist
 
     # Clear cache if enabled
     if $clear_cache; then

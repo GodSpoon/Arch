@@ -1,0 +1,392 @@
+#!/bin/bash
+#
+# Clone - Drive/SD Card Backup Tool using partclone
+# Creates compressed image backups of block devices
+#
+# Usage:
+#   clone                                    # Interactive mode
+#   clone /dev/sda                          # Specify source, prompt for destination
+#   clone /dev/sda ~/backup.img.gz          # Fully specified
+#
+
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+# Script variables
+SOURCE_DEV=""
+DEST_FILE=""
+SCRIPT_NAME=$(basename "$0")
+
+# Helper functions
+print_error() {
+    echo -e "${RED}✗ Error:${NC} $1" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ${NC} $1"
+}
+
+print_warn() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
+print_header() {
+    echo -e "\n${BOLD}${CYAN}═══════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}  Drive Backup Tool - Partclone Edition${NC}"
+    echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════${NC}\n"
+}
+
+# Check if running as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run as root"
+        echo -e "  Try: ${CYAN}sudo $0 $*${NC}"
+        exit 1
+    fi
+}
+
+# Check dependencies
+check_dependencies() {
+    local missing_deps=()
+
+    for cmd in lsblk partprobe; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    # Check for any partclone variant
+    if ! command -v partclone.ext4 &> /dev/null && \
+       ! command -v partclone.ntfs &> /dev/null && \
+       ! command -v partclone.dd &> /dev/null; then
+        missing_deps+=("partclone")
+    fi
+
+    if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        print_error "Missing required dependencies: ${missing_deps[*]}"
+        echo -e "  Install with: ${CYAN}sudo pacman -S ${missing_deps[*]}${NC}"
+        exit 1
+    fi
+}
+
+# Get list of available block devices
+get_block_devices() {
+    lsblk -ndo NAME,SIZE,TYPE,MOUNTPOINT,MODEL,VENDOR | \
+    grep -E "disk|part" | \
+    grep -v -E "loop|ram|sr0" | \
+    awk '{
+        dev=$1
+        size=$2
+        type=$3
+        rest=""
+        for(i=4;i<=NF;i++) rest=rest" "$i
+        gsub(/^[ \t]+|[ \t]+$/, "", rest)
+        printf "/dev/%s|%s|%s|%s\n", dev, size, type, rest
+    }'
+}
+
+# Select source device
+select_source_device() {
+    local devices
+    devices=$(get_block_devices)
+
+    if [[ -z "$devices" ]]; then
+        print_error "No suitable block devices found"
+        exit 1
+    fi
+
+    echo -e "${BOLD}Select source device to backup:${NC}\n"
+
+    if command -v fzf &> /dev/null; then
+        local selected
+        selected=$(echo "$devices" | \
+            awk -F'|' '{printf "%-15s %-8s %-6s %s\n", $1, $2, $3, $4}' | \
+            fzf --height=15 --reverse --header="DEVICE          SIZE     TYPE   INFO" \
+                --prompt="Select device > " \
+                --preview='lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT {}' \
+                --preview-window=right:50%:wrap || true)
+
+        if [[ -z "$selected" ]]; then
+            print_warn "No device selected, aborting"
+            exit 0
+        fi
+
+        SOURCE_DEV=$(echo "$selected" | awk '{print $1}')
+    else
+        local -a dev_array
+        local i=1
+
+        while IFS='|' read -r dev size type info; do
+            printf "  ${CYAN}%2d)${NC} %-15s %-8s %-6s %s\n" "$i" "$dev" "$size" "$type" "$info"
+            dev_array+=("$dev")
+            ((i++))
+        done <<< "$devices"
+
+        echo
+        read -p "Select device number (1-$((i-1))): " selection
+
+        if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -ge $i ]]; then
+            print_error "Invalid selection"
+            exit 1
+        fi
+
+        SOURCE_DEV="${dev_array[$((selection-1))]}"
+    fi
+
+    print_success "Selected source: ${BOLD}$SOURCE_DEV${NC}"
+}
+
+# Validate source device
+validate_source_device() {
+    if [[ ! -b "$SOURCE_DEV" ]]; then
+        print_error "Device $SOURCE_DEV does not exist or is not a block device"
+        exit 1
+    fi
+
+    partprobe "$SOURCE_DEV" 2>/dev/null || true
+
+    echo
+    print_info "Device information:"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$SOURCE_DEV"
+    echo
+}
+
+# Select destination file
+select_destination_file() {
+    local default_name
+    default_name="backup_$(basename "$SOURCE_DEV")_$(date +%Y%m%d_%H%M%S).img.gz"
+
+    # Try to use the original user's home if running via sudo
+    local user_home
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    else
+        user_home="$HOME"
+    fi
+
+    echo -e "${BOLD}Enter backup destination:${NC}"
+    echo -e "  Default: ${CYAN}$(pwd)/$default_name${NC}"
+    echo
+    read -p "Destination file (Enter for default): " user_input
+
+    if [[ -z "$user_input" ]]; then
+        DEST_FILE="$(pwd)/$default_name"
+    else
+        # Expand tilde to actual user's home
+        DEST_FILE="${user_input/#\~/$user_home}"
+
+        if [[ -d "$DEST_FILE" ]]; then
+            DEST_FILE="$DEST_FILE/$default_name"
+        fi
+
+        if [[ "$DEST_FILE" != /* ]]; then
+            DEST_FILE="$(pwd)/$DEST_FILE"
+        fi
+    fi
+
+    if [[ -f "$DEST_FILE" ]]; then
+        print_warn "File already exists: $DEST_FILE"
+        read -p "Overwrite? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            print_warn "Backup cancelled"
+            exit 0
+        fi
+    fi
+
+    local dest_dir
+    dest_dir=$(dirname "$DEST_FILE")
+    if [[ ! -d "$dest_dir" ]]; then
+        print_info "Creating directory: $dest_dir"
+        mkdir -p "$dest_dir"
+    fi
+
+    print_success "Destination: ${BOLD}$DEST_FILE${NC}"
+}
+
+# Detect filesystem and select appropriate partclone variant
+get_partclone_cmd() {
+    local device="$1"
+    local fstype
+
+    fstype=$(lsblk -no FSTYPE "$device" 2>/dev/null | head -1)
+
+    if [[ -z "$fstype" ]]; then
+        print_warn "Could not detect filesystem type, using partclone.dd (full backup)"
+        echo "partclone.dd"
+        return
+    fi
+
+    case "$fstype" in
+        ext2|ext3|ext4)
+            echo "partclone.ext4"
+            ;;
+        ntfs)
+            echo "partclone.ntfs"
+            ;;
+        fat|vfat|fat16|fat32)
+            echo "partclone.vfat"
+            ;;
+        exfat)
+            echo "partclone.exfat"
+            ;;
+        btrfs)
+            echo "partclone.btrfs"
+            ;;
+        xfs)
+            echo "partclone.xfs"
+            ;;
+        f2fs)
+            echo "partclone.f2fs"
+            ;;
+        *)
+            print_warn "Filesystem '$fstype' not specifically supported, using partclone.dd"
+            echo "partclone.dd"
+            ;;
+    esac
+}
+
+# Calculate estimated backup size
+estimate_size() {
+    local device="$1"
+    local used_blocks
+
+    print_info "Estimating backup size..."
+
+    used_blocks=$(lsblk -bno SIZE "$device" 2>/dev/null | head -1)
+
+    if [[ -n "$used_blocks" ]]; then
+        local size_gb=$((used_blocks / 1024 / 1024 / 1024))
+        echo -e "  Device size: ${BOLD}${size_gb} GB${NC} (compressed backup will be smaller)"
+    fi
+}
+
+# Perform the backup
+perform_backup() {
+    local partclone_cmd
+    partclone_cmd=$(get_partclone_cmd "$SOURCE_DEV")
+
+    print_info "Using: ${BOLD}$partclone_cmd${NC}"
+    estimate_size "$SOURCE_DEV"
+
+    echo
+    print_warn "Starting backup of $SOURCE_DEV to $DEST_FILE"
+    echo -e "${YELLOW}This may take a while depending on the size of the device...${NC}"
+    echo
+
+    read -p "Continue? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_warn "Backup cancelled"
+        exit 0
+    fi
+
+    echo
+    print_info "Backup in progress..."
+
+    if command -v pv &> /dev/null; then
+        if $partclone_cmd -c -s "$SOURCE_DEV" 2>/dev/null | pv -N "Cloning" | gzip -c > "$DEST_FILE"; then
+            echo
+            print_success "Backup completed successfully!"
+        else
+            echo
+            print_error "Backup failed!"
+            rm -f "$DEST_FILE"
+            exit 1
+        fi
+    else
+        if $partclone_cmd -c -s "$SOURCE_DEV" 2>/dev/null | gzip -c > "$DEST_FILE"; then
+            echo
+            print_success "Backup completed successfully!"
+        else
+            echo
+            print_error "Backup failed!"
+            rm -f "$DEST_FILE"
+            exit 1
+        fi
+    fi
+
+    # Fix ownership if run via sudo
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        chown "$SUDO_USER:$SUDO_USER" "$DEST_FILE" 2>/dev/null || true
+    fi
+
+    local final_size
+    final_size=$(du -h "$DEST_FILE" | cut -f1)
+    print_info "Backup file size: ${BOLD}$final_size${NC}"
+    print_info "Location: ${BOLD}$DEST_FILE${NC}"
+}
+
+# Main function
+main() {
+    print_header
+    check_root
+    check_dependencies
+
+    case $# in
+        0)
+            select_source_device
+            validate_source_device
+            select_destination_file
+            ;;
+        1)
+            SOURCE_DEV="$1"
+            validate_source_device
+            select_destination_file
+            ;;
+        2)
+            SOURCE_DEV="$1"
+            DEST_FILE="$2"
+
+            # Expand tilde to actual user's home
+            if [[ -n "${SUDO_USER:-}" ]]; then
+                user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+            else
+                user_home="$HOME"
+            fi
+            DEST_FILE="${DEST_FILE/#\~/$user_home}"
+
+            if [[ -d "$DEST_FILE" ]]; then
+                default_name="backup_$(basename "$SOURCE_DEV")_$(date +%Y%m%d_%H%M%S).img.gz"
+                DEST_FILE="$DEST_FILE/$default_name"
+            fi
+
+            if [[ "$DEST_FILE" != /* ]]; then
+                DEST_FILE="$(pwd)/$DEST_FILE"
+            fi
+
+            dest_dir=$(dirname "$DEST_FILE")
+            if [[ ! -d "$dest_dir" ]]; then
+                mkdir -p "$dest_dir"
+            fi
+
+            validate_source_device
+            print_success "Destination: ${BOLD}$DEST_FILE${NC}"
+            ;;
+        *)
+            print_error "Invalid number of arguments"
+            echo -e "\n${BOLD}Usage:${NC}"
+            echo -e "  $SCRIPT_NAME                           # Interactive mode"
+            echo -e "  $SCRIPT_NAME /dev/sdX                  # Specify source"
+            echo -e "  $SCRIPT_NAME /dev/sdX ~/backup.img.gz  # Full specification"
+            exit 1
+            ;;
+    esac
+
+    perform_backup
+
+    echo
+    print_success "All done! 🎉"
+}
+
+main "$@"

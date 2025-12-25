@@ -1,0 +1,39 @@
+ash() {
+    # Check if autossh is installed
+    if ! command -v autossh &> /dev/null; then
+        echo "autossh not found. Attempting to install..."
+        
+        # Check if we're on Arch (has pacman)
+        if command -v pacman &> /dev/null; then
+            # Try yay first, fallback to pacman
+            if command -v yay &> /dev/null; then
+                echo "Installing autossh via yay..."
+                yay -S autossh
+            else
+                echo "Installing autossh via pacman..."
+                sudo pacman -S autossh
+            fi
+        else
+            echo "Not on Arch Linux. Please install autossh manually."
+            return 1
+        fi
+        
+        # Check again if installation was successful
+        if ! command -v autossh &> /dev/null; then
+            echo "Failed to install autossh"
+            return 1
+        fi
+        echo "autossh installed successfully!"
+    fi
+    
+    # Ensure at least one argument is provided
+    if [ $# -eq 0 ]; then
+        echo "Usage: ash user@host [additional_options]"
+        echo "Example: ash root@10.0.0.234"
+        return 1
+    fi
+    
+    # Run autossh with the specified options
+    echo "Connecting to $1 with autossh..."
+    autossh -M 0 -o "ServerAliveInterval=30" -o "ServerAliveCountMax=3" -X "$@"
+}
