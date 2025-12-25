@@ -1,18 +1,59 @@
-# Auto add, commit, and push with timestamp and change summary
+#!/bin/bash
+# Enhanced ghup function with upstream tracking support
+
 ghup() {
-  # Check if in git repo
-  git rev-parse --is-inside-work-tree > /dev/null 2>&1 || { echo "Not in a git repository"; return 1; }
+    # Check if we're in a git repository
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "❌ Not in a git repository"
+        return 1
+    fi
 
-  # Get timestamp and stage changes
-  timestamp=$(date "+%Y-%m-%d_%H-%M-%S")
-  git add -A
+    local current_branch=$(git branch --show-current)
+    local timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+    local commit_msg="${timestamp}+${1:-auto_commit}"
 
-  # Create summary of changes (files and stats)
-  changes=$(git diff --cached --stat | grep '|' | awk '{print $1 " (" $4 " " $5 ")"}' | head -5 | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
-  files_count=$(git diff --cached --stat | grep '|' | wc -l)
-  [[ $files_count -gt 5 ]] && changes="${changes}, ...(and $((files_count-5)) more files)"
+    echo "🔄 Committing and pushing changes: $commit_msg"
 
-  # Commit and push
-  echo "Committing and pushing changes: ${timestamp}+${changes}"
-  git commit -m "${timestamp}+${changes}" && git push
+    # Add all changes
+    git add .
+
+    # Check if there are changes to commit
+    if git diff --staged --quiet; then
+        echo "📝 No changes to commit"
+    else
+        # Commit changes
+        git commit -m "$commit_msg"
+    fi
+
+    # Check if remote exists
+    if ! git remote get-url origin > /dev/null 2>&1; then
+        echo "❌ No remote 'origin' configured"
+        echo "💡 Set up remote with: git remote add origin https://github.com/yourusername/repo.git"
+        return 1
+    fi
+
+    # Check if current branch has upstream tracking
+    if ! git rev-parse --abbrev-ref @{upstream} > /dev/null 2>&1; then
+        echo "🔧 Setting up upstream tracking for branch: $current_branch"
+        git push --set-upstream origin "$current_branch"
+    else
+        # Normal push
+        git push
+    fi
+
+    # Check if push was successful
+    if [ $? -eq 0 ]; then
+        echo "✅ Successfully pushed to origin/$current_branch"
+
+        # Show some helpful info for ABK repos
+        if [[ "$(basename "$PWD")" == "abk" ]]; then
+            echo "📊 ABK Status:"
+            echo "   Branch: $current_branch"
+            echo "   Size: $(du -sh --exclude=.git . | cut -f1)"
+            echo "   Last commit: $(git log -1 --format="%ar" 2>/dev/null)"
+        fi
+    else
+        echo "❌ Push failed"
+        return 1
+    fi
 }
