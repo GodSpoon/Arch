@@ -57,7 +57,7 @@ echo "Starting VPN namespace..."
 systemctl start vpn-namespace.service
 
 # Wait for initialization
-sleep 3
+sleep 5
 
 # Verify setup
 echo ""
