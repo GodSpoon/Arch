@@ -121,3 +121,37 @@ sudo rm /etc/sudoers.d/vpn-namespace
 sudo rm -rf /etc/netns/qbtorrent
 sudo ip netns delete qbtorrent
 ```
+
+## Management Scripts
+```bash
+# Enable VPN namespace (start + auto-start on boot)
+./enable.sh
+
+# Disable VPN namespace (stop + disable auto-start)
+./disable.sh
+
+# Verify current status
+./verify.sh
+
+# Reinstall (if something breaks)
+sudo ./install.sh
+
+# Completely uninstall
+./uninstall.sh
+```
+
+## Daily Usage
+
+The namespace starts automatically on boot. Just launch qBittorrent:
+```bash
+qbittorrent-vpn
+```
+
+Or use the desktop entry: **qBittorrent (VPN)** in your application menu.
+
+To temporarily disable the VPN (e.g., for maintenance):
+```bash
+./disable.sh
+# Do your work...
+./enable.sh
+```
