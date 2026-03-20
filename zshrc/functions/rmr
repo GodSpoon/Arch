@@ -1,62 +1,167 @@
+# ─────────────────────────────────────────────────────────────
+# rmr — Rate mirrors, optionally update, maintain Arch systems
+#
+# Usage: rmr [-y|-p] [-c] [-n] [-f]
+#   -y  Full update via yay (AUR + official), with confirm prompts
+#   -p  Update via pacman only (official repos)
+#   -c  Skip cache clearing
+#   -n  --noconfirm for updates (use with -y or -p)
+#   -f  Force: skip mirror update, just refresh DBs + update
+# ─────────────────────────────────────────────────────────────
 rmr() {
-    local update_yay=false
-    local update_pacman=false
+    local update_mode=""
     local clear_cache=true
+    local noconfirm=false
+    local skip_mirrors=false
+    local confirm_flag=""
 
-    # Parse command line options
-    while getopts ":ypc" opt; do
+    while getopts ":ypcnf" opt; do
         case ${opt} in
-            y ) update_yay=true ;;
-            p ) update_pacman=true ;;
+            y ) update_mode="yay" ;;
+            p ) update_mode="pacman" ;;
             c ) clear_cache=false ;;
-            \? ) echo "Usage: rmr [-y] [-p] [-c]"
-                 echo "  -y: Update packages using yay"
-                 echo "  -p: Update packages using pacman"
-                 echo "  -c: Disable cache clearing"
-                 return 1
-            ;;
+            n ) noconfirm=true ;;
+            f ) skip_mirrors=true ;;
+            \? )
+                echo "Usage: rmr [-y|-p] [-c] [-n] [-f]"
+                echo "  -y  Full update via yay (AUR + official)"
+                echo "  -p  Update via pacman (official only)"
+                echo "  -c  Skip cache clearing"
+                echo "  -n  Non-interactive (--noconfirm) for updates"
+                echo "  -f  Skip mirror update, just refresh DBs and update"
+                return 1
+                ;;
         esac
     done
 
-    # Temporary files for mirrors
-    local TMPFILE_ARCH="$(mktemp)"
-    local TMPFILE_ENDEAVOUR="$(mktemp)"
-    local TMPFILE_CHAOTIC="$(mktemp)"
+    $noconfirm && confirm_flag="--noconfirm"
 
-    # Ensure sudo privileges
+    # Ensure sudo is cached upfront
     sudo true || return 1
 
-    # Update Arch Linux mirrors
-    rate-mirrors --save=$TMPFILE_ARCH --disable-comments-in-file --protocol https --country-test-mirrors-per-country 3 --country-neighbors-per-country 1 arch --max-delay=40000 \
-    && sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup \
-    && sudo mv $TMPFILE_ARCH /etc/pacman.d/mirrorlist
+    # ── Mirror Updates ──────────────────────────────────────────
+    if ! $skip_mirrors; then
+        local TMPFILE_ARCH TMPFILE_ENDEAVOUR
+        TMPFILE_ARCH="$(mktemp)"
+        TMPFILE_ENDEAVOUR="$(mktemp)"
 
-    # Update EndeavourOS mirrors
-    rate-mirrors --save=$TMPFILE_ENDEAVOUR endeavouros \
-    && sudo mv /etc/pacman.d/endeavouros-mirrorlist /etc/pacman.d/endeavouros-mirrorlist-backup \
-    && sudo mv $TMPFILE_ENDEAVOUR /etc/pacman.d/endeavouros-mirrorlist
+        echo "==> [1/2] Updating Arch Linux mirrors..."
+        if rate-mirrors \
+            --save="$TMPFILE_ARCH" \
+            --disable-comments-in-file \
+            --protocol https \
+            --country-test-mirrors-per-country 3 \
+            --country-neighbors-per-country 1 \
+            --max-delay=86400 \
+            arch; then
+            sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup
+            sudo mv "$TMPFILE_ARCH" /etc/pacman.d/mirrorlist
+            echo "==> Arch mirrorlist updated (backup: /etc/pacman.d/mirrorlist-backup)"
+        else
+            echo "==> WARNING: Failed to update Arch mirrorlist — keeping existing"
+            rm -f "$TMPFILE_ARCH"
+        fi
 
-    # Update Chaotic AUR mirrors
-    # rate-mirrors --save=$TMPFILE_CHAOTIC chaotic-aur \
-    #&& sudo mv /etc/pacman.d/chaotic-mirrorlist /etc/pacman.d/chaotic-mirrorlist-backup \
-    #&& sudo mv $TMPFILE_CHAOTIC /etc/pacman.d/chaotic-mirrorlist
+        echo "==> [2/2] Updating EndeavourOS mirrors..."
+        if rate-mirrors --save="$TMPFILE_ENDEAVOUR" endeavouros; then
+            sudo mv /etc/pacman.d/endeavouros-mirrorlist /etc/pacman.d/endeavouros-mirrorlist-backup
+            sudo mv "$TMPFILE_ENDEAVOUR" /etc/pacman.d/endeavouros-mirrorlist
+            echo "==> EndeavourOS mirrorlist updated"
+        else
+            echo "==> WARNING: Failed to update EOS mirrorlist — keeping existing"
+            rm -f "$TMPFILE_ENDEAVOUR"
+        fi
+    else
+        echo "==> Skipping mirror update (-f flag)"
+    fi
 
-    # Clear cache if enabled
+    # ── CRITICAL: Force DB refresh from new mirrors ─────────────
+    # This is what prevents 404s — new mirrorlist needs fresh DB sync
+    echo "==> Forcing package database refresh from new mirrors..."
+    sudo pacman -Syy || {
+        echo "==> ERROR: Failed to refresh package databases"
+        return 1
+    }
+
+    # ── Cache Cleanup ────────────────────────────────────────────
     if $clear_cache; then
-        echo "Clearing package cache..."
-        sudo paccache -r
-        sudo paccache -ruk0
+        echo "==> Clearing package cache..."
+        sudo paccache -r          # keep last 3 versions of installed
+        sudo paccache -ruk0       # remove all versions of uninstalled
         yay -Scc --noconfirm
     fi
 
-    # Update packages if requested
-    if $update_yay; then
-        echo "Updating packages with yay..."
-        yay -Syyu --noconfirm
-    elif $update_pacman; then
-        echo "Updating packages with pacman..."
-        sudo pacman -Syu --noconfirm
+    # ── Updates ──────────────────────────────────────────────────
+    case "$update_mode" in
+        yay)
+            echo "==> Updating all packages via yay (AUR + official)..."
+            yay -Syyu $confirm_flag && _rmr_post_update
+            ;;
+        pacman)
+            echo "==> Updating packages via pacman (official only)..."
+            sudo pacman -Syu $confirm_flag && _rmr_post_update
+            ;;
+    esac
+
+    echo ""
+    echo "==> rmr completed successfully."
+}
+
+# ─────────────────────────────────────────────────────────────
+# Post-update checks: pacnew files, failed units
+# ─────────────────────────────────────────────────────────────
+_rmr_post_update() {
+    echo ""
+
+    # Check for pacnew files (updated configs needing manual merge)
+    local pacnew_files
+    pacnew_files=$(find /etc -name "*.pacnew" 2>/dev/null | sort)
+    if [[ -n "$pacnew_files" ]]; then
+        echo "==> ⚠  pacnew files found — review with 'pacdiff':"
+        echo "$pacnew_files" | sed 's/^/     /'
     fi
 
-    echo "rmr completed successfully."
+    # Check for failed systemd units that may need attention post-update
+    local failed_units
+    failed_units=$(systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{print $1}')
+    if [[ -n "$failed_units" ]]; then
+        echo "==> ⚠  Failed systemd units detected:"
+        echo "$failed_units" | sed 's/^/     /'
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# pac — Drop-in pacman -S wrapper with auto-retry on 404
+#
+# Usage: pac <package(s)>  (same args as pacman -S)
+# ─────────────────────────────────────────────────────────────
+pac() {
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: pac <package(s)>"
+        return 1
+    fi
+
+    echo "==> Installing: $*"
+    if sudo pacman -S "$@"; then
+        return 0
+    fi
+
+    # If it failed, try refreshing DBs and retry once
+    echo ""
+    echo "==> Install failed — refreshing package databases and retrying..."
+    sudo pacman -Syy || { echo "==> ERROR: Could not refresh databases"; return 1; }
+
+    echo "==> Retrying installation..."
+    if sudo pacman -S "$@"; then
+        return 0
+    fi
+
+    # Still failing — offer mirror refresh
+    echo ""
+    echo "==> Still failing. This may be a mirror sync lag issue."
+    echo "    Options:"
+    echo "      1) Run 'rmr -f' to refresh DBs without re-running rate-mirrors"
+    echo "      2) Run 'rmr' to re-rank mirrors entirely, then retry"
+    echo "      3) Wait a few minutes for mirrors to sync and try again"
+    return 1
 }
