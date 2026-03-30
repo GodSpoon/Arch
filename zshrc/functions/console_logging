@@ -1,0 +1,22 @@
+# Console session logging
+# Auto-sourced from ~/SPOON_GIT/Arch/zshrc/functions/
+# Logs to ~/.console-logs/, max 8GB, pruned in background
+
+[[ $- != *i* || -n "$CONSOLE_LOG_ACTIVE" ]] && return
+
+export CONSOLE_LOG_ACTIVE=1
+
+_LOG_DIR="$HOME/.console-logs"
+[[ -d "$_LOG_DIR" ]] || mkdir -p "$_LOG_DIR"
+
+exec > >(tee -a "$_LOG_DIR/$(date +'%Y-%m-%d %I:%M:%S %p EST').log") 2>&1
+
+# Prune oldest logs in background — never blocks shell startup
+(
+    _max=$(( 8 * 1024 * 1024 * 1024 ))
+    while (( $(du -sb "$_LOG_DIR" 2>/dev/null | cut -f1) > _max )); do
+        oldest=$(ls -t "$_LOG_DIR"/*.log 2>/dev/null | tail -1)
+        [[ -z "$oldest" ]] && break
+        rm -f -- "$oldest"
+    done
+) &!

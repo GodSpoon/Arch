@@ -1,167 +1,266 @@
 # ─────────────────────────────────────────────────────────────
-# rmr — Rate mirrors, optionally update, maintain Arch systems
-#
-# Usage: rmr [-y|-p] [-c] [-n] [-f]
-#   -y  Full update via yay (AUR + official), with confirm prompts
-#   -p  Update via pacman only (official repos)
-#   -c  Skip cache clearing
-#   -n  --noconfirm for updates (use with -y or -p)
-#   -f  Force: skip mirror update, just refresh DBs + update
+# rmr — Arch system maintenance: mirrors, keyring, cache, updates
+# Usage: rmr [-y|-p] [-c] [-n] [-f] [-q] [-h]
 # ─────────────────────────────────────────────────────────────
-rmr() {
-    local update_mode=""
-    local clear_cache=true
-    local noconfirm=false
-    local skip_mirrors=false
-    local confirm_flag=""
 
-    while getopts ":ypcnf" opt; do
-        case ${opt} in
-            y ) update_mode="yay" ;;
-            p ) update_mode="pacman" ;;
-            c ) clear_cache=false ;;
-            n ) noconfirm=true ;;
-            f ) skip_mirrors=true ;;
-            \? )
-                echo "Usage: rmr [-y|-p] [-c] [-n] [-f]"
-                echo "  -y  Full update via yay (AUR + official)"
-                echo "  -p  Update via pacman (official only)"
-                echo "  -c  Skip cache clearing"
-                echo "  -n  Non-interactive (--noconfirm) for updates"
-                echo "  -f  Skip mirror update, just refresh DBs and update"
-                return 1
-                ;;
+# Palette: bold-cyan accent · magenta stats · dim secondary
+_RMR_G=$'\033[0;32m' _RMR_Y=$'\033[0;33m' _RMR_R=$'\033[0;31m'
+_RMR_C=$'\033[1;36m' _RMR_M=$'\033[0;35m' _RMR_D=$'\033[2m'
+_RMR_BLD=$'\033[1m'  _RMR_RST=$'\033[0m'
+_RMR_OK="${_RMR_G}✔${_RMR_RST}" _RMR_WN="${_RMR_Y}⚠${_RMR_RST}"
+_RMR_ER="${_RMR_R}✖${_RMR_RST}" _RMR_IF="${_RMR_D}›${_RMR_RST}"
+_RMR_SPID=0
+
+_rmr_spin() {
+    { local si=0 sp=('⠋' '⠙' '⠸' '⠴' '⠦' '⠇')
+      while true; do
+        printf "\r\033[K  ${_RMR_C}%s${_RMR_RST} ${_RMR_BLD}%s${_RMR_RST}" "${sp[$((si++ % 6 + 1))]}" "$*"; sleep 0.09
+      done } &!
+    _RMR_SPID=$!
+}
+
+# Mirror-ranking spinner with live phase/count/top-speed from rate-mirrors log
+_rmr_spin_log() {
+    local label="$1" log="$2"
+    { local si=0 sp=('⠋' '⠙' '⠸' '⠴' '⠦' '⠇') fch=0 cnt=0 tot=0 stat="" _f _c _t _s _sp
+      while true; do
+        stat=""; _sp=""
+        if [[ -f $log ]]; then
+            _f=$(grep -c 'FETCHED MIRROR VERSION' "$log" 2>/dev/null)
+            _c=$(grep -cE 'SpeedTestResult|FAILED TO CONNECT' "$log" 2>/dev/null)
+            _t=$(grep -oE 'MIRRORS LEFT AFTER FILTERING: [0-9]+' "$log" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+            _s=$(grep -oE '[0-9.]+ [KM]B/s' "$log" 2>/dev/null | awk '{v=$1;if($2=="KB/s")v=v/1024;if(v>m){m=v;r=$0}}END{print r}')
+            [[ $_f =~ ^[0-9]+$ ]] && fch=$_f
+            [[ $_c =~ ^[0-9]+$ ]] && cnt=$_c
+            [[ $_t =~ ^[0-9]+$ ]] && tot=$_t
+            [[ -n $_s ]] && _sp=" ${_RMR_D}↑${_RMR_RST} ${_RMR_M}${_s}${_RMR_RST}"
+            if   grep -q 'RE-TESTING TOP' "$log" 2>/dev/null; then stat=" ${_RMR_D}retesting${_RMR_RST}${_sp}"
+            elif [[ $tot -gt 0 ]];                             then stat=" ${_RMR_D}testing${_RMR_RST} ${_RMR_M}${cnt}/${tot}${_RMR_RST}${_sp}"
+            elif [[ $fch -gt 0 ]];                             then stat=" ${_RMR_D}fetching${_RMR_RST} ${_RMR_M}${fch}${_RMR_RST}"
+            fi
+        fi
+        printf "\r\033[K  ${_RMR_C}%s${_RMR_RST} ${_RMR_BLD}%s${_RMR_RST}%s" "${sp[$((si++ % 6 + 1))]}" "$label" "$stat"
+        sleep 0.15
+      done } &!
+    _RMR_SPID=$!
+}
+_rmr_done() { (( _RMR_SPID > 0 )) && { kill $_RMR_SPID 2>/dev/null; _RMR_SPID=0; }; printf "\r\033[2K"; }
+_rmr_ok()   { _rmr_done; printf "  ${_RMR_OK} %s\n" "$*"; }
+_rmr_err()  { _rmr_done; printf "  ${_RMR_ER} %s\n" "$*"; }
+_rmr_warn() { _rmr_done; printf "  ${_RMR_WN} %s\n" "$*"; }
+
+_rmr_help() {
+    printf "${_RMR_BLD}${_RMR_C}rmr${_RMR_RST} — Arch system maintenance\n\n"
+    printf "${_RMR_BLD}Usage:${_RMR_RST}  rmr [options]\n\n"
+    printf "${_RMR_BLD}Options:${_RMR_RST}\n"
+    printf "  ${_RMR_G}-y${_RMR_RST}    Full upgrade  ${_RMR_D}(pacman official first, then yay AUR-only)${_RMR_RST}\n"
+    printf "  ${_RMR_G}-p${_RMR_RST}    Upgrade via pacman  ${_RMR_D}(official repos only)${_RMR_RST}\n"
+    printf "  ${_RMR_G}-c${_RMR_RST}    Skip cache cleanup\n"
+    printf "  ${_RMR_G}-n${_RMR_RST}    Non-interactive  ${_RMR_D}(--noconfirm)${_RMR_RST}\n"
+    printf "  ${_RMR_G}-f${_RMR_RST}    Fast — skip mirror ranking, just refresh DBs\n"
+    printf "  ${_RMR_G}-q${_RMR_RST}    Dry-run — show what would happen, make no changes\n"
+    printf "  ${_RMR_G}-h${_RMR_RST}    Show this help\n"
+    printf "\n${_RMR_BLD}Steps performed (in order):${_RMR_RST}\n"
+    printf "  ${_RMR_M}1.${_RMR_RST} Update archlinux-keyring\n"
+    printf "  ${_RMR_M}2.${_RMR_RST} Rank Arch + EndeavourOS mirrors  ${_RMR_D}(rate-mirrors)${_RMR_RST}\n"
+    printf "  ${_RMR_M}3.${_RMR_RST} Refresh package databases  ${_RMR_D}(pacman -Syy)${_RMR_RST}\n"
+    printf "  ${_RMR_M}4.${_RMR_RST} Clear package cache  ${_RMR_D}(paccache + yay -Scc)${_RMR_RST}\n"
+    printf "  ${_RMR_M}5.${_RMR_RST} Remove orphan packages  ${_RMR_D}(prompts unless -n)${_RMR_RST}\n"
+    printf "  ${_RMR_M}6.${_RMR_RST} Upgrade official packages  ${_RMR_D}(pacman -Syu, if -y or -p)${_RMR_RST}\n"
+    printf "  ${_RMR_M}7.${_RMR_RST} Upgrade AUR packages  ${_RMR_D}(yay -Sua, if -y)${_RMR_RST}\n"
+    printf "\n${_RMR_BLD}Examples:${_RMR_RST}\n"
+    printf "  ${_RMR_C}rmr${_RMR_RST}          Refresh mirrors + keyring + cache\n"
+    printf "  ${_RMR_C}rmr -y${_RMR_RST}       Full upgrade (pacman + AUR)\n"
+    printf "  ${_RMR_C}rmr -yn${_RMR_RST}      Full upgrade, non-interactive\n"
+    printf "  ${_RMR_C}rmr -f -p${_RMR_RST}    Skip mirror rank, upgrade via pacman\n"
+    printf "  ${_RMR_C}rmr -q${_RMR_RST}       Dry-run preview\n"
+}
+
+rmr() {
+    local upd="" nocnf=false no_cache=false no_mirrors=false dryrun=false cflag=""
+
+    while getopts ":ypcnfqh" o; do
+        case $o in
+            y) upd=yay ;;
+            p) upd=pacman ;;
+            c) no_cache=true ;;
+            n) nocnf=true; cflag=--noconfirm ;;
+            f) no_mirrors=true ;;
+            q) dryrun=true ;;
+            h) _rmr_help; return 0 ;;
+            \?) printf "  ${_RMR_ER} Unknown flag: -%s  (try: rmr -h)\n" "$OPTARG"; return 1 ;;
         esac
     done
 
-    $noconfirm && confirm_flag="--noconfirm"
-
-    # Ensure sudo is cached upfront
-    sudo true || return 1
-
-    # ── Mirror Updates ──────────────────────────────────────────
-    if ! $skip_mirrors; then
-        local TMPFILE_ARCH TMPFILE_ENDEAVOUR
-        TMPFILE_ARCH="$(mktemp)"
-        TMPFILE_ENDEAVOUR="$(mktemp)"
-
-        echo "==> [1/2] Updating Arch Linux mirrors..."
-        if rate-mirrors \
-            --save="$TMPFILE_ARCH" \
-            --disable-comments-in-file \
-            --protocol https \
-            --country-test-mirrors-per-country 3 \
-            --country-neighbors-per-country 1 \
-            --max-delay=86400 \
-            arch; then
-            sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup
-            sudo mv "$TMPFILE_ARCH" /etc/pacman.d/mirrorlist
-            echo "==> Arch mirrorlist updated (backup: /etc/pacman.d/mirrorlist-backup)"
-        else
-            echo "==> WARNING: Failed to update Arch mirrorlist — keeping existing"
-            rm -f "$TMPFILE_ARCH"
+    # ── Dry-run / check mode ──────────────────────────────────────
+    if $dryrun; then
+        printf "${_RMR_BLD}rmr — check mode (no changes):${_RMR_RST}\n"
+        $no_mirrors || printf "  ${_RMR_IF} Update archlinux-keyring\n"
+        $no_mirrors || printf "  ${_RMR_IF} Rank Arch + EndeavourOS mirrors\n"
+        command -v snapper &>/dev/null && printf "  ${_RMR_IF} Create pre-update btrfs snapshot\n"
+        printf "  ${_RMR_IF} Refresh package databases (pacman -Syy)\n"
+        $no_cache || printf "  ${_RMR_IF} Clear package cache (paccache + yay)\n"
+        printf "  ${_RMR_IF} Remove orphan packages (if found)\n"
+        if [[ $upd == yay ]]; then
+            printf "  ${_RMR_IF} Upgrade official packages via pacman\n"
+            printf "  ${_RMR_IF} Upgrade AUR-only packages via yay\n"
+        elif [[ -n $upd ]]; then
+            printf "  ${_RMR_IF} Upgrade official packages via pacman\n"
         fi
-
-        echo "==> [2/2] Updating EndeavourOS mirrors..."
-        if rate-mirrors --save="$TMPFILE_ENDEAVOUR" endeavouros; then
-            sudo mv /etc/pacman.d/endeavouros-mirrorlist /etc/pacman.d/endeavouros-mirrorlist-backup
-            sudo mv "$TMPFILE_ENDEAVOUR" /etc/pacman.d/endeavouros-mirrorlist
-            echo "==> EndeavourOS mirrorlist updated"
-        else
-            echo "==> WARNING: Failed to update EOS mirrorlist — keeping existing"
-            rm -f "$TMPFILE_ENDEAVOUR"
-        fi
-    else
-        echo "==> Skipping mirror update (-f flag)"
+        return 0
     fi
 
-    # ── CRITICAL: Force DB refresh from new mirrors ─────────────
-    # This is what prevents 404s — new mirrorlist needs fresh DB sync
-    echo "==> Forcing package database refresh from new mirrors..."
-    sudo pacman -Syy || {
-        echo "==> ERROR: Failed to refresh package databases"
+    # ── Lock file check ───────────────────────────────────────────
+    [[ -f /var/lib/pacman/db.lck ]] && {
+        printf "  ${_RMR_ER} pacman locked — remove /var/lib/pacman/db.lck if no pacman is running\n"
         return 1
     }
 
-    # ── Cache Cleanup ────────────────────────────────────────────
-    if $clear_cache; then
-        echo "==> Clearing package cache..."
-        sudo paccache -r          # keep last 3 versions of installed
-        sudo paccache -ruk0       # remove all versions of uninstalled
-        yay -Scc --noconfirm
+    sudo -v || return 1
+
+    printf "\n${_RMR_BLD}${_RMR_C}rmr${_RMR_RST} — Arch system maintenance\n\n"
+
+    # ── Keyring ───────────────────────────────────────────────────
+    _rmr_spin "Updating keyring..."
+    sudo pacman -S --noconfirm archlinux-keyring &>/dev/null \
+        && _rmr_ok "Keyring updated" || _rmr_warn "Keyring update failed (non-fatal)"
+
+    # ── Btrfs snapshot (if snapper is present) ────────────────────
+    if command -v snapper &>/dev/null; then
+        _rmr_spin "Creating pre-update snapshot..."
+        sudo snapper -c root create --description "rmr pre-update" &>/dev/null \
+            && _rmr_ok "Snapshot created" || _rmr_warn "Snapshot failed (non-fatal)"
     fi
 
-    # ── Updates ──────────────────────────────────────────────────
-    case "$update_mode" in
-        yay)
-            echo "==> Updating all packages via yay (AUR + official)..."
-            yay -Syyu $confirm_flag && _rmr_post_update
-            ;;
-        pacman)
-            echo "==> Updating packages via pacman (official only)..."
-            sudo pacman -Syu $confirm_flag && _rmr_post_update
-            ;;
-    esac
+    # ── Mirrors ───────────────────────────────────────────────────
+    if ! $no_mirrors; then
+        local ta te tla tle top_n cands
+        ta=$(mktemp); tla=$(mktemp)
+        te=$(mktemp); tle=$(mktemp)
 
-    echo ""
-    echo "==> rmr completed successfully."
-}
+        _rmr_spin_log "Ranking Arch mirrors..." "$tla"
+        if rate-mirrors --save="$ta" --disable-comments-in-file \
+            --protocol https \
+            --country-test-mirrors-per-country 3 \
+            --country-neighbors-per-country 1 \
+            arch --max-delay=86400 >"$tla" 2>&1; then
+            top_n=$(grep -c '^Server' "$ta" 2>/dev/null || echo 0)
+            cands=$(grep -oE 'MIRRORS LEFT AFTER FILTERING: [0-9]+' "$tla" | tail -1 | grep -oE '[0-9]+$' || echo 0)
+            sudo cp /etc/pacman.d/mirrorlist{,-backup} &>/dev/null
+            sudo mv "$ta" /etc/pacman.d/mirrorlist
+            _rmr_ok "Arch mirrorlist — ${top_n} servers saved (${cands} candidates)"
+        else
+            rm -f "$ta"
+            _rmr_warn "Arch mirrorlist unchanged (rate-mirrors failed)"
+        fi
+        rm -f "$tla"
 
-# ─────────────────────────────────────────────────────────────
-# Post-update checks: pacnew files, failed units
-# ─────────────────────────────────────────────────────────────
-_rmr_post_update() {
-    echo ""
-
-    # Check for pacnew files (updated configs needing manual merge)
-    local pacnew_files
-    pacnew_files=$(find /etc -name "*.pacnew" 2>/dev/null | sort)
-    if [[ -n "$pacnew_files" ]]; then
-        echo "==> ⚠  pacnew files found — review with 'pacdiff':"
-        echo "$pacnew_files" | sed 's/^/     /'
+        _rmr_spin_log "Ranking EndeavourOS mirrors..." "$tle"
+        if rate-mirrors --save="$te" endeavouros >"$tle" 2>&1; then
+            top_n=$(grep -c '^Server' "$te" 2>/dev/null || echo 0)
+            cands=$(grep -oE 'MIRRORS LEFT AFTER FILTERING: [0-9]+' "$tle" | tail -1 | grep -oE '[0-9]+$' || echo 0)
+            sudo cp /etc/pacman.d/endeavouros-mirrorlist{,-backup} &>/dev/null
+            sudo mv "$te" /etc/pacman.d/endeavouros-mirrorlist
+            _rmr_ok "EndeavourOS mirrorlist — ${top_n} servers saved (${cands} candidates)"
+        else
+            rm -f "$te"
+            _rmr_warn "EndeavourOS mirrorlist unchanged (rate-mirrors failed)"
+        fi
+        rm -f "$tle"
+    else
+        printf "  ${_RMR_IF} Mirror ranking skipped (-f)\n"
     fi
 
-    # Check for failed systemd units that may need attention post-update
-    local failed_units
-    failed_units=$(systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{print $1}')
-    if [[ -n "$failed_units" ]]; then
-        echo "==> ⚠  Failed systemd units detected:"
-        echo "$failed_units" | sed 's/^/     /'
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────
-# pac — Drop-in pacman -S wrapper with auto-retry on 404
-#
-# Usage: pac <package(s)>  (same args as pacman -S)
-# ─────────────────────────────────────────────────────────────
-pac() {
-    if [[ $# -eq 0 ]]; then
-        echo "Usage: pac <package(s)>"
+    # ── DB refresh ────────────────────────────────────────────────
+    _rmr_spin "Refreshing package databases..."
+    if sudo pacman -Syy &>/dev/null; then
+        _rmr_ok "Package databases refreshed"
+    else
+        _rmr_err "DB refresh failed"
         return 1
     fi
 
-    echo "==> Installing: $*"
-    if sudo pacman -S "$@"; then
-        return 0
+    # ── Cache cleanup ─────────────────────────────────────────────
+    if ! $no_cache; then
+        _rmr_spin "Clearing package cache..."
+        sudo paccache -rq &>/dev/null
+        sudo paccache -ruk0q &>/dev/null
+        command -v yay &>/dev/null && yay -Scc --noconfirm &>/dev/null
+        _rmr_ok "Package cache cleared"
     fi
 
-    # If it failed, try refreshing DBs and retry once
-    echo ""
-    echo "==> Install failed — refreshing package databases and retrying..."
-    sudo pacman -Syy || { echo "==> ERROR: Could not refresh databases"; return 1; }
-
-    echo "==> Retrying installation..."
-    if sudo pacman -S "$@"; then
-        return 0
+    # ── Orphan cleanup ────────────────────────────────────────────
+    local orph
+    orph=$(pacman -Qdtq 2>/dev/null)
+    if [[ -n $orph ]]; then
+        printf "  ${_RMR_WN} Orphans: %s\n" "${orph//$'\n'/ }"
+        local do_remove=false
+        if $nocnf; then
+            do_remove=true
+        else
+            printf "    Remove? [y/N] "; read -r _rmr_ans
+            [[ $_rmr_ans =~ ^[Yy]$ ]] && do_remove=true
+        fi
+        if $do_remove; then
+            sudo pacman -Rns --noconfirm ${=orph} &>/dev/null \
+                && printf "  ${_RMR_OK} Orphans removed\n" \
+                || printf "  ${_RMR_WN} Orphan removal failed\n"
+        fi
     fi
 
-    # Still failing — offer mirror refresh
-    echo ""
-    echo "==> Still failing. This may be a mirror sync lag issue."
-    echo "    Options:"
-    echo "      1) Run 'rmr -f' to refresh DBs without re-running rate-mirrors"
-    echo "      2) Run 'rmr' to re-rank mirrors entirely, then retry"
-    echo "      3) Wait a few minutes for mirrors to sync and try again"
+    # ── Updates ───────────────────────────────────────────────────
+    case $upd in
+        yay)
+            printf "\n${_RMR_BLD}[1/2] Upgrading official packages via pacman...${_RMR_RST}\n"
+            sudo pacman -Syu $cflag || { _rmr_warn "pacman upgrade failed — skipping AUR"; return 1; }
+            printf "\n${_RMR_BLD}[2/2] Upgrading AUR packages via yay...${_RMR_RST}\n"
+            yay -Sua $cflag && _rmr_post_update
+            ;;
+        pacman)
+            printf "\n${_RMR_BLD}Upgrading official packages via pacman...${_RMR_RST}\n"
+            sudo pacman -Syu $cflag && _rmr_post_update
+            ;;
+    esac
+
+    printf "\n  ${_RMR_OK} ${_RMR_BLD}rmr completed${_RMR_RST}\n\n"
+}
+
+# ─────────────────────────────────────────────────────────────
+# Post-update checks: pacnew files, failed systemd units
+# ─────────────────────────────────────────────────────────────
+_rmr_post_update() {
+    local pacnew failed
+
+    pacnew=$(find /etc -name "*.pacnew" 2>/dev/null | sort)
+    [[ -n $pacnew ]] && {
+        printf "  ${_RMR_WN} pacnew files found — review with 'pacdiff':\n"
+        printf "     %s\n" ${(f)pacnew}
+    }
+
+    failed=$(systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{print $1}')
+    [[ -n $failed ]] && {
+        printf "  ${_RMR_WN} Failed systemd units:\n"
+        printf "     %s\n" ${(f)failed}
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# pac — drop-in pacman -S wrapper with auto-retry on 404
+# ─────────────────────────────────────────────────────────────
+pac() {
+    [[ $# -eq 0 ]] && { printf "Usage: pac <package(s)>\n"; return 1; }
+
+    printf "  ${_RMR_IF} Installing: %s\n" "$*"
+    sudo pacman -S "$@" && return 0
+
+    printf "\n  ${_RMR_WN} Install failed — refreshing databases...\n"
+    sudo pacman -Syy || { printf "  ${_RMR_ER} Could not refresh databases\n"; return 1; }
+
+    printf "  ${_RMR_IF} Retrying...\n"
+    sudo pacman -S "$@" && return 0
+
+    printf "\n  ${_RMR_WN} Still failing. Options:\n"
+    printf "     rmr -f   — refresh DBs without re-ranking mirrors\n"
+    printf "     rmr      — re-rank mirrors entirely, then retry\n"
     return 1
 }
